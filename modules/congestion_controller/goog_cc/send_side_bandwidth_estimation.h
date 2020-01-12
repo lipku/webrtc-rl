@@ -112,7 +112,13 @@ class SendSideBandwidthEstimation {
   void SetAcknowledgedRate(absl::optional<DataRate> acknowledged_rate,
                            Timestamp at_time);
   void IncomingPacketFeedbackVector(const TransportPacketsFeedback& report);
-
+    
+    //add by lihengz 2020-1-5
+    int choose_action(int state);
+    int qlearn(int last_state,int last_action,float curr_loss,float last_loss);
+    bool need_learn_;
+    DataRate loss_estimate_rate_;
+    
  private:
   friend class GoogCcStatePrinter;
 
@@ -188,6 +194,13 @@ class SendSideBandwidthEstimation {
   float high_loss_threshold_;
   DataRate bitrate_threshold_;
   LossBasedBandwidthEstimation loss_based_bandwidth_estimation_;
+    
+    //add by lihengz 2020-1-5
+    float q_table[3][3]; //state-action  state 0-loss:<2%  1-loss:2%~10%  2-loss:>10%; action 0-incr  1-hold  2-decr
+    float r_table[3][3]; //action-loss change  action 0-incr  1-hold  2-decr; loss change
+    int last_state_;
+    int last_action_;
+    float last_loss_;
 };
 }  // namespace webrtc
 #endif  // MODULES_CONGESTION_CONTROLLER_GOOG_CC_SEND_SIDE_BANDWIDTH_ESTIMATION_H_

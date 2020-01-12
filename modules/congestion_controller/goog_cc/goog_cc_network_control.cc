@@ -638,6 +638,18 @@ void GoogCcNetworkController::MaybeTriggerOnNetworkChanged(
     RTC_LOG(LS_VERBOSE) << "bwe " << at_time.ms() << " pushback_target_bps="
                         << last_pushback_target_rate_.bps()
                         << " estimate_bps=" << loss_based_target_rate.bps();
+      
+      
+      //add by lihengz 2020-01-04
+      DataRate loss_estimate_rate = bandwidth_estimation_->loss_estimate_rate_;
+      if(loss_estimate_rate==pushback_target_rate)
+          bandwidth_estimation_->need_learn_=true;
+      RTC_LOG(LS_INFO) << "bwetimems=" << at_time.ms()
+      << " loss="<< fraction_loss
+      << " rtt="<< round_trip_time.ms()
+      << " target_bps="<< pushback_target_rate.bps()
+      << " loss_estimate_bps=" << loss_estimate_rate.bps()
+      << " stable_target_rate=" << target_rate_msg.stable_target_rate.bps();
   }
 }
 

@@ -186,7 +186,8 @@ TimeDelta RttBasedBackoff::CorrectedRtt(Timestamp at_time) const {
 RttBasedBackoff::~RttBasedBackoff() = default;
 
 SendSideBandwidthEstimation::SendSideBandwidthEstimation(RtcEventLog* event_log)
-    : lost_packets_since_last_loss_update_(0),
+    : loss_estimate_rate_(DataRate::Zero()), //lihengz
+    lost_packets_since_last_loss_update_(0),
       expected_packets_since_last_loss_update_(0),
       current_target_(DataRate::Zero()),
       last_logged_target_(DataRate::Zero()),
@@ -213,7 +214,7 @@ SendSideBandwidthEstimation::SendSideBandwidthEstimation(RtcEventLog* event_log)
       last_rtc_event_log_(Timestamp::MinusInfinity()),
       low_loss_threshold_(kDefaultLowLossThreshold),
       high_loss_threshold_(kDefaultHighLossThreshold),
-      bitrate_threshold_(kDefaultBitrateThreshold) {
+      bitrate_threshold_(kDefaultBitrateThreshold){
   RTC_DCHECK(event_log);
   if (BweLossExperimentIsEnabled()) {
     uint32_t bitrate_threshold_kbps;
@@ -226,6 +227,18 @@ SendSideBandwidthEstimation::SendSideBandwidthEstimation(RtcEventLog* event_log)
       bitrate_threshold_ = DataRate::kbps(bitrate_threshold_kbps);
     }
   }
+          
+  //add by lihengz 2020-1-5
+          q_table[0][0]=1;q_table[0][1]=0;q_table[0][2]=-1;
+          q_table[1][0]=0;q_table[1][1]=1;q_table[1][2]=0;
+          q_table[2][0]=-1;q_table[2][1]=0;q_table[2][2]=1;
+          
+          r_table[0][0]=2;r_table[0][1]=1;r_table[0][2]=-1;
+          r_table[1][0]=1;r_table[1][1]=0;r_table[1][2]=-1;
+          r_table[2][0]=1;r_table[2][1]=-1;r_table[2][2]=-2;
+          need_learn_=false;
+          last_state_=0;
+          last_loss_=0;
 }
 
 SendSideBandwidthEstimation::~SendSideBandwidthEstimation() {}
@@ -366,6 +379,7 @@ void SendSideBandwidthEstimation::UpdatePacketsLost(int packets_lost,
     lost_packets_since_last_loss_update_ = 0;
     expected_packets_since_last_loss_update_ = 0;
     last_loss_packet_report_ = at_time;
+      qlearn(last_state_,last_action_,last_fraction_loss_,last_loss_); //add by lihengz 2020-1-5
     UpdateEstimate(at_time);
   }
   UpdateUmaStatsPacketsLost(at_time, packets_lost);
@@ -413,6 +427,60 @@ void SendSideBandwidthEstimation::UpdateRtt(TimeDelta rtt, Timestamp at_time) {
   }
 }
 
+    int SendSideBandwidthEstimation::qlearn(int last_state,int last_action,float curr_loss,float last_loss) {
+        if(!need_learn_)
+            return 0;
+        
+        float q_predict=q_table[last_state][last_action];
+        int loss_change=1;
+        if(curr_loss>last_loss*1.1)
+            loss_change=2;
+        else if(curr_loss<last_loss*0.9)
+            loss_change=0;
+        float reward=r_table[last_action][loss_change];
+        
+        float loss = curr_loss / 256.0f;
+        int state;
+        if(loss <= low_loss_threshold_) //<2%
+            state=0;
+        else if(loss <= high_loss_threshold_) //2%~10%
+            state=1;
+        else //>10%
+            state=2;
+        float max_qval=q_table[state][0];
+        for(int i=1;i<3;i++){
+            if(q_table[state][i]>max_qval)
+                max_qval=q_table[state][i];
+        }
+        
+        float q_target=0;
+        if(state!=0)
+            q_target = reward + 0.5*max_qval;
+        else
+            q_target = reward;
+        
+        q_table[last_state][last_action]+= 0.5*(q_target-q_predict);
+        
+        RTC_LOG(LS_INFO) << "q_table " << q_table[0][0]<<","<<q_table[0][1]<<","<<q_table[0][2]
+        <<","<< q_table[1][0]<<","<<q_table[1][1]<<","<<q_table[1][2]
+        <<","<< q_table[2][0]<<","<<q_table[2][1]<<","<<q_table[2][2];
+        
+        need_learn_=false;
+        return 0;
+    }
+    
+    int SendSideBandwidthEstimation::choose_action(int state) {
+        int max_action=0;
+        float max_q=q_table[state][0];
+        for(int i=1;i<3;i++){
+            if(q_table[state][i]>max_q){
+                max_q=q_table[state][i];
+                max_action=i;
+            }
+        }
+        return max_action;
+    }
+    
 void SendSideBandwidthEstimation::UpdateEstimate(Timestamp at_time) {
   if (rtt_backoff_.CorrectedRtt(at_time) > rtt_backoff_.rtt_limit_) {
     if (at_time - time_last_decrease_ >= rtt_backoff_.drop_interval_ &&
@@ -473,7 +541,52 @@ void SendSideBandwidthEstimation::UpdateEstimate(Timestamp at_time) {
   }
 
   TimeDelta time_since_loss_packet_report = at_time - last_loss_packet_report_;
-  if (time_since_loss_packet_report < 1.2 * kMaxRtcpFeedbackInterval) {
+    //add by lihengz 2020-1-5
+    if (time_since_loss_packet_report < 1.2 * kMaxRtcpFeedbackInterval) {
+        // We only care about loss above a given bitrate threshold.
+        float loss = last_fraction_loss_ / 256.0f;
+        int state;
+        if(loss <= low_loss_threshold_) //<2%
+            state=0;
+        else if(loss <= high_loss_threshold_) //2%~10%
+            state=1;
+        else //>10%
+            state=2;
+        int action=choose_action(state);
+        last_state_=state;
+        last_action_=action;
+        last_loss_=last_fraction_loss_;
+        if(action==0){
+            DataRate new_bitrate =
+            DataRate::bps(min_bitrate_history_.front().second.bps() * 1.08 + 0.5);
+            new_bitrate += DataRate::bps(1000);
+            loss_estimate_rate_=new_bitrate;
+            UpdateTargetBitrate(new_bitrate, at_time);
+            return;
+        }
+        else if(action==2){
+            if (!has_decreased_since_last_fraction_loss_ &&
+                (at_time - time_last_decrease_) >=
+                (kBweDecreaseInterval + last_round_trip_time_)) {
+                time_last_decrease_ = at_time;
+                
+                // Reduce rate:
+                //   newRate = rate * (1 - 0.5*lossRate);
+                //   where packetLoss = 256*lossRate;
+                DataRate new_bitrate =
+                DataRate::bps((current_target_.bps() *
+                               static_cast<double>(512 - last_fraction_loss_)) /
+                              512.0);
+                has_decreased_since_last_fraction_loss_ = true;
+                loss_estimate_rate_=new_bitrate;
+                UpdateTargetBitrate(new_bitrate, at_time);
+                return;
+            }
+        }
+        else
+            loss_estimate_rate_=current_target_;
+    }
+  /*if (time_since_loss_packet_report < 1.2 * kMaxRtcpFeedbackInterval) {
     // We only care about loss above a given bitrate threshold.
     float loss = last_fraction_loss_ / 256.0f;
     // We only make decisions based on loss when the bitrate is above a
@@ -523,7 +636,7 @@ void SendSideBandwidthEstimation::UpdateEstimate(Timestamp at_time) {
         }
       }
     }
-  }
+  }*/
   // TODO(srte): This is likely redundant in most cases.
   ApplyTargetLimits(at_time);
 }
